@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>DAMLA</title>
+<meta name="theme-color" content="#141412">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+  :root {
+    --bg: #141412;
+    --surface: #1c1c19;
+    --text-primary: #F1EFE8;
+    --text-secondary: #B4B2A9;
+    --text-muted: #7a7970;
+    --danger-bg: #D85A30;
+    --danger-text: #141412;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    overflow: hidden;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    max-width: 480px;
+    margin: 0 auto;
+    padding: 16px;
+  }
+  #top-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 8px;
+  }
+  #title { font-size: 16px; font-weight: 600; letter-spacing: 0.5px; }
+  #score-display { font-size: 20px; font-weight: 600; }
+  #next-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-bottom: 8px;
+  }
+  #next-label { font-size: 12px; color: var(--text-secondary); }
+  #next-preview { border-radius: 50%; flex-shrink: 0; }
+  #game-wrap {
+    position: relative;
+    flex: 1;
+    background: var(--surface);
+    border-radius: 16px;
+    overflow: hidden;
+    touch-action: none;
+  }
+  #game-canvas { width: 100%; height: 100%; display: block; }
+  #game-over {
+    display: none;
+    position: absolute; inset: 0;
+    background: rgba(0,0,0,0.6);
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+  }
+  #game-over-title { font-size: 22px; font-weight: 600; margin-bottom: 4px; }
+  #final-score-text { font-size: 14px; color: var(--text-secondary); margin-bottom: 16px; }
+  button {
+    background: var(--text-primary);
+    color: var(--bg);
+    border: none;
+    border-radius: 999px;
+    padding: 14px 32px;
+    font-size: 15px;
+    font-weight: 600;
+    font-family: inherit;
+  }
+  button:active { opacity: 0.8; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="top-bar">
+    <span id="title">DAMLA</span>
+    <span id="score-display">0</span>
+  </div>
+  <div id="next-row">
+    <span id="next-label">sıradaki</span>
+    <div id="next-preview"></div>
+  </div>
+  <div id="game-wrap">
+    <canvas id="game-canvas"></canvas>
+    <div id="game-over">
+      <div id="game-over-title">taştı</div>
+      <div id="final-score-text"></div>
+      <button id="retry-btn">Yeniden dene</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+<script>
+(function(){
+  var Engine = Matter.Engine, Render = Matter.Render, World = Matter.World,
+      Bodies = Matter.Bodies, Body = Matter.Body, Events = Matter.Events,
+      Composite = Matter.Composite;
+
+  var wrap = document.getElementById('game-wrap');
+  var canvas = document.getElementById('game-canvas');
+  var scoreDisplay = document.getElementById('score-display');
+  var gameOverEl = document.getElementById('game-over');
+  var finalScoreText = document.getElementById('final-score-text');
+  var retryBtn = document.getElementById('retry-btn');
+  var nextPreview = document.getElementById('next-preview');
+
+  var W, H;
+  var engine, render, runner;
+  var score = 0;
+  var gameOver = false;
+  var nextTier = 0;
+  var canDrop = true;
+
+  // ton tablosu: yarıçap ve renk, büyüdükçe koyulaşıyor
+  var tiers = [
+    { r: 16, color: '#85B7EB' },
+    { r: 22, color: '#378ADD' },
+    { r: 29, color: '#185FA5' },
+    { r: 37, color: '#5DCAA5' },
+    { r: 46, color: '#1D9E75' },
+    { r: 56, color: '#0F6E56' },
+    { r: 67, color: '#F0997B' },
+    { r: 79, color: '#D85A30' }
+  ];
+
+  function updatePreview(){
+    var t = tiers[nextTier];
+    var display = Math.min(t.r, 26);
+    nextPreview.style.width = (display*2) + 'px';
+    nextPreview.style.height = (display*2) + 'px';
+    nextPreview.style.background = t.color;
+  }
+
+  function setup(){
+    var rect = wrap.getBoundingClientRect();
+    W = rect.width; H = rect.height;
+    canvas.width = W * devicePixelRatio;
+    canvas.height = H * devicePixelRatio;
+
+    engine = Engine.create();
+    engine.gravity.y = 1.0;
+    // çarpışma çözümü daha hassas olsun, temas noktasındaki itki daha doğru aktarılsın
+    engine.positionIterations = 10;
+    engine.velocityIterations = 8;
+
+    render = Render.create({
+      canvas: canvas,
+      engine: engine,
+      options: {
+        width: W,
+        height: H,
+        pixelRatio: devicePixelRatio,
+        wireframes: false,
+        background: 'transparent'
+      }
+    });
+
+    var wallOpts = { isStatic: true, restitution: 0.4, friction: 0, render: { fillStyle: '#00000000' } };
+    var ground = Bodies.rectangle(W/2, H+10, W, 20, wallOpts);
+    var leftWall = Bodies.rectangle(-10, H/2, 20, H, wallOpts);
+    var rightWall = Bodies.rectangle(W+10, H/2, 20, H, wallOpts);
+    World.add(engine.world, [ground, leftWall, rightWall]);
+
+    Render.run(render);
+    runner = Matter.Runner.create();
+    Matter.Runner.run(runner, engine);
+
+    // aynı tondaki iki top çarpışınca birleşip bir üst tona geçiyor
+    Events.on(engine, 'collisionStart', function(event){
+      event.pairs.forEach(function(pair){
+        var a = pair.bodyA, b = pair.bodyB;
+        if(a.tier === undefined || b.tier === undefined) return;
+        if(a.merged || b.merged) return;
+        if(a.tier === b.tier && a.tier < tiers.length - 1){
+          a.merged = true; b.merged = true;
+          var newTier = a.tier + 1;
+          var midX = (a.position.x + b.position.x)/2;
+          var midY = (a.position.y + b.position.y)/2;
+          World.remove(engine.world, [a,b]);
+          spawnBall(midX, midY, newTier, true);
+          score += (newTier+1) * 10;
+          scoreDisplay.textContent = score;
+        }
+      });
+    });
+
+    // üst çizgide uzun süre sıkışan top varsa oyun biter
+    Events.on(engine, 'afterUpdate', function(){
+      if(gameOver) return;
+      Composite.allBodies(engine.world).forEach(function(body){
+        if(body.tier !== undefined && !body.isStatic){
+          if(body.position.y - body.circleRadius < 60 && body.settledAt){
+            if(Date.now() - body.settledAt > 900){
+              triggerGameOver();
+            }
+          } else {
+            body.settledAt = null;
+          }
+          if(Math.abs(body.velocity.y) < 0.08 && body.position.y - body.circleRadius < 60){
+            if(!body.settledAt) body.settledAt = Date.now();
+          }
+        }
+      });
+    });
+
+    nextTier = Math.floor(Math.random()*3);
+    updatePreview();
+  }
+
+  function spawnBall(x, y, tier, isMerge){
+    var t = tiers[tier];
+    var ball = Bodies.circle(x, y, t.r, {
+      restitution: 0.45,
+      friction: 0.01,
+      frictionStatic: 0.02,
+      frictionAir: 0.006,
+      density: 0.0012,
+      slop: 0.02,
+      render: { fillStyle: t.color }
+    });
+    ball.tier = tier;
+    ball.circleRadius = t.r;
+    World.add(engine.world, ball);
+    // hafif rastgele dönme, tamamen sabit düşmesin
+    Body.setAngularVelocity(ball, (Math.random()-0.5) * 0.2);
+    if(isMerge){
+      // birleşmede hafif dışa itiş, komşu toplar tepki versin
+      Body.applyForce(ball, ball.position, { x: (Math.random()-0.5)*0.0015, y: -0.001 });
+    }
+    return ball;
+  }
+
+  function triggerGameOver(){
+    gameOver = true;
+    Matter.Runner.stop(runner);
+    finalScoreText.textContent = 'skor: ' + score;
+    gameOverEl.style.display = 'flex';
+  }
+
+  function doDrop(x){
+    if(!canDrop || gameOver) return;
+    canDrop = false;
+    var clampedX = Math.max(tiers[nextTier].r+2, Math.min(W-tiers[nextTier].r-2, x));
+    spawnBall(clampedX, 40, nextTier, false);
+    nextTier = Math.floor(Math.random()*3);
+    updatePreview();
+    setTimeout(function(){ canDrop = true; }, 400);
+  }
+
+  function getX(e){
+    var rect = canvas.getBoundingClientRect();
+    var t = e.touches ? e.touches[0] : e;
+    return t.clientX - rect.left;
+  }
+
+  canvas.addEventListener('mousedown', function(e){ doDrop(getX(e)); });
+  canvas.addEventListener('touchstart', function(e){ e.preventDefault(); doDrop(getX(e)); }, {passive:false});
+
+  retryBtn.addEventListener('click', function(){
+    Render.stop(render);
+    Matter.Runner.stop(runner);
+    World.clear(engine.world);
+    Engine.clear(engine);
+    score = 0;
+    gameOver = false;
+    scoreDisplay.textContent = '0';
+    gameOverEl.style.display = 'none';
+    setup();
+  });
+
+  window.addEventListener('resize', function(){
+    // basit yaklaşım: yeniden boyutlanınca oyunu sıfırla, üretimde oran korunarak yapılabilir
+    location.reload();
+  });
+
+  setup();
+
+  // PWA service worker kaydı
+  if('serviceWorker' in navigator){
+    window.addEventListener('load', function(){
+      navigator.serviceWorker.register('sw.js');
+    });
+  }
+})();
+</script>
+</body>
+</html>
